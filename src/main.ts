@@ -245,6 +245,42 @@ async function playAudioBlob(blob: Blob): Promise<void> {
       `Nie udało się odtworzyć audio. iOS wymaga interakcji użytkownika. Spróbuj ponownie nacisnąć Start. Szczegóły: ${e.message}`
     );
   }
+
+  // Wait until playback ends or the loop is stopped (pause)
+  await new Promise<void>((resolve, reject) => {
+    const cleanup = () => {
+      audioEl.removeEventListener('ended', onEnded);
+      audioEl.removeEventListener('pause', onPause);
+      audioEl.removeEventListener('error', onError);
+      audioEl.removeEventListener('abort', onAbort);
+      try { URL.revokeObjectURL(objectUrl); } catch {}
+    };
+    const onEnded = () => {
+      cleanup();
+      resolve();
+    };
+    const onPause = () => {
+      // If user stopped the loop, treat as resolved to allow clean exit
+      if (!running) {
+        cleanup();
+        resolve();
+      }
+    };
+    const onError = () => {
+      const mediaError = audioEl.error?.message || 'nieznany błąd mediów';
+      cleanup();
+      reject(new Error(`Błąd odtwarzania audio: ${mediaError}`));
+    };
+    const onAbort = () => {
+      cleanup();
+      reject(new Error('Odtwarzanie przerwane.'));
+    };
+
+    audioEl.addEventListener('ended', onEnded, { once: true });
+    audioEl.addEventListener('pause', onPause);
+    audioEl.addEventListener('error', onError, { once: true });
+    audioEl.addEventListener('abort', onAbort, { once: true });
+  });
 }
 
 async function loopOnce(): Promise<void> {
@@ -263,8 +299,9 @@ async function loopOnce(): Promise<void> {
   appendStatus('Audio gotowe. Odtwarzanie…');
 
   await playAudioBlob(audioBlob);
-  appendStatus('Odtwarzanie rozpoczęte.');
+  appendStatus('Odtwarzanie zakończone.');
 
+  if (!running) return;
   setStage('Oczekiwanie');
   appendStatus('Czekam 10 sekund…');
   await wait(10_000);
