@@ -17,6 +17,7 @@
       .status { margin: 12px 0; padding: 12px; background: #111114; border: 1px dashed #2a2a2f; border-radius: 8px; min-height: 64px; white-space: pre-wrap; word-break: break-word; }
       .controls { display: flex; gap: 8px; margin-top: 12px; }
       button { flex: 1; padding: 12px 14px; border-radius: 10px; border: 1px solid #2a2a2f; background: #1e1e22; color: #fff; font-size: 1rem; touch-action: manipulation; }
+      select { flex: 1; padding: 12px 14px; border-radius: 10px; border: 1px solid #2a2a2f; background: #1e1e22; color: #fff; font-size: 1rem; }
       button.primary { background: #2563eb; border-color: #2563eb; }
       button:disabled { opacity: 0.5; }
       .small { font-size: 0.85rem; opacity: 0.9; }
@@ -33,6 +34,10 @@
         <div class="stage"><span class="label">Etap:</span> <strong id="stage">Bezczynny</strong></div>
         <div id="status" class="status">Gotowy. Dotknij „Start”, aby rozpocząć. Upewnij się, że zezwoliłeś na lokalizację i dźwięk.</div>
         <div class="controls">
+          <select id="lang" aria-label="Language">
+            <option value="pl">Polski</option>
+            <option value="en">English</option>
+          </select>
           <button id="startBtn" class="primary">Start</button>
           <button id="stopBtn" disabled>Stop</button>
         </div>

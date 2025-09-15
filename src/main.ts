@@ -7,6 +7,8 @@ type Stage =
   | 'Odtwarzanie'
   | 'Oczekiwanie';
 
+type Lang = 'pl' | 'en';
+
 type GeoPosition = { lat: number; lon: number };
 
 type Attraction = {
@@ -27,6 +29,7 @@ const statusEl = document.getElementById('status') as HTMLDivElement;
 const startBtn = document.getElementById('startBtn') as HTMLButtonElement;
 const stopBtn = document.getElementById('stopBtn') as HTMLButtonElement;
 const audioEl = document.getElementById('player') as HTMLAudioElement;
+const langSelect = document.getElementById('lang') as HTMLSelectElement | null;
 
 let running = false;
 let currentStage: Stage = 'Bezczynny';
@@ -51,6 +54,10 @@ function resetStatus(text: string) {
 
 function wait(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function getSelectedLang(): Lang {
+  return (langSelect?.value === 'en' ? 'en' : 'pl');
 }
 
 function ensureEnvOrThrow() {
@@ -87,10 +94,11 @@ async function getLocation(): Promise<GeoPosition> {
   });
 }
 
-async function fetchNearestAttraction(position: GeoPosition): Promise<Attraction> {
+async function fetchNearestAttraction(position: GeoPosition, lang: Lang): Promise<Attraction> {
   setStage('Wyszukiwanie atrakcji');
-  // 1) Geosearch near coordinates (Polish Wikipedia)
-  const geoUrl = new URL('https://pl.wikipedia.org/w/api.php');
+  // 1) Geosearch near coordinates (language-specific Wikipedia)
+  const wikiHost = lang === 'en' ? 'https://en.wikipedia.org' : 'https://pl.wikipedia.org';
+  const geoUrl = new URL(wikiHost + '/w/api.php');
   geoUrl.searchParams.set('format', 'json');
   geoUrl.searchParams.set('origin', '*');
   geoUrl.searchParams.set('action', 'query');
@@ -114,7 +122,7 @@ async function fetchNearestAttraction(position: GeoPosition): Promise<Attraction
   const distance = best.dist as number;
 
   // 2) Fetch intro extract for page
-  const extractUrl = new URL('https://pl.wikipedia.org/w/api.php');
+  const extractUrl = new URL(wikiHost + '/w/api.php');
   extractUrl.searchParams.set('format', 'json');
   extractUrl.searchParams.set('origin', '*');
   extractUrl.searchParams.set('action', 'query');
@@ -140,16 +148,21 @@ async function fetchNearestAttraction(position: GeoPosition): Promise<Attraction
   };
 }
 
-async function generatePolishGuideText(attraction: Attraction): Promise<string> {
+async function generateGuideText(attraction: Attraction, lang: Lang): Promise<string> {
   setStage('Generowanie skryptu');
 
   ensureEnvOrThrow();
-  const system =
-    'Jesteś lokalnym przewodnikiem turystycznym. Tworzysz zwięzłe, przyjazne i naturalne opisy atrakcji w języku polskim.';
-  const user = `
+  const isPl = lang === 'pl';
+  const system = isPl
+    ? 'Jesteś lokalnym przewodnikiem turystycznym. Tworzysz zwięzłe, przyjazne i naturalne opisy atrakcji w języku polskim.'
+    : 'You are a local tour guide. You create concise, friendly and natural descriptions of attractions in English.';
+  const distance = isFinite(attraction.distanceMeters) ? Math.round(attraction.distanceMeters) + ' m' : (isPl ? 'nieznana' : 'unknown');
+  const extract = attraction.extract || (isPl ? 'brak' : 'none');
+  const user = isPl
+    ? `
 Atrakcja: ${attraction.title}
-Odległość: ${isFinite(attraction.distanceMeters) ? Math.round(attraction.distanceMeters) + ' m' : 'nieznana'}
-Opis (skrót z Wikipedii, może być niepełny): ${attraction.extract || 'brak'}
+Odległość: ${distance}
+Opis (skrót z Wikipedii, może być niepełny): ${extract}
 
 Zadanie: Napisz dokładnie 3 zdania po polsku o najbliższej atrakcji dla audio przewodnika.
 Zasady:
@@ -158,6 +171,19 @@ Zasady:
 - Dodaj jedną ciekawostkę lub kontekst historyczny, jeśli to możliwe.
 - Nie wspominaj o Wikipedii ani o źródłach.
 - Maksymalnie ~60 słów łącznie.
+`
+    : `
+Attraction: ${attraction.title}
+Distance: ${distance}
+Summary (intro from Wikipedia, may be incomplete): ${extract}
+
+Task: Write exactly 3 sentences in English about the nearest attraction for an audio guide.
+Guidelines:
+- Start with a brief introduction of the place and why it matters.
+- Use natural spoken language; avoid parentheses, abbreviations, and citations.
+- Add one fun fact or historical context if possible.
+- Do not mention Wikipedia or sources.
+- About ~60 words total.
 `;
 
   const body = {
@@ -191,7 +217,7 @@ Zasady:
   return content.replace(/\n+/g, ' ').trim();
 }
 
-async function synthesizeAudioPolish(text: string): Promise<Blob> {
+async function synthesizeAudio(text: string, _lang: Lang): Promise<Blob> {
   setStage('Generowanie audio');
   ensureEnvOrThrow();
 
@@ -286,16 +312,17 @@ async function playAudioBlob(blob: Blob): Promise<void> {
 async function loopOnce(): Promise<void> {
   resetStatus('');
   appendStatus('Start iteracji…');
+  const lang = getSelectedLang();
   const pos = await getLocation();
   appendStatus(`Lokalizacja: lat=${pos.lat.toFixed(5)}, lon=${pos.lon.toFixed(5)}`);
 
-  const attraction = await fetchNearestAttraction(pos);
+  const attraction = await fetchNearestAttraction(pos, lang);
   appendStatus(`Najbliższa atrakcja: ${attraction.title} (${isFinite(attraction.distanceMeters) ? Math.round(attraction.distanceMeters) + ' m' : '—'})`);
 
-  const text = await generatePolishGuideText(attraction);
+  const text = await generateGuideText(attraction, lang);
   appendStatus('Wygenerowano skrypt.');
 
-  const audioBlob = await synthesizeAudioPolish(text);
+  const audioBlob = await synthesizeAudio(text, lang);
   appendStatus('Audio gotowe. Odtwarzanie…');
 
   await playAudioBlob(audioBlob);
