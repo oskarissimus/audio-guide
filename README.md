@@ -1,47 +1,34 @@
-# Audio przewodnik (Vite + TypeScript)
+# Tour Guide v2 (mobile web)
 
-## Uruchomienie lokalne
+- v1 code moved to `v1/` (original single-card UI with loop)
+- v2 at repo root: map-first mobile web app showing nearby attractions; tap a marker to generate a short script, synthesize audio (ElevenLabs), and play inline (iOS supported)
+
+## Dev
 
 ```bash
 npm install
 npm run dev
 ```
 
-Build i podgląd:
+Build and preview:
 
 ```bash
 npm run build
 npm run preview
 ```
 
-## Wymagane sekrety środowiskowe (czas budowania)
+## Environment variables (build time)
 
 - `VITE_OPENAI_API_KEY`
 - `VITE_ELEVENLABS_API_KEY`
 
-W GitHub Actions sekrety są przekazywane jako zmienne środowiskowe w kroku „Build” i zostają osadzone w wynikowym JS (uwaga: aplikacja jest w 100% front‑endowa, więc klucze będą widoczne w przeglądarce).
+These are embedded client-side. Do not use production secrets you cannot expose publicly.
 
-## Działanie aplikacji
+## Deployment
 
-Aplikacja działa w nieskończonej pętli i wykonuje kroki sekwencyjnie, pokazując bieżący etap na ekranie:
+The existing GitHub Actions workflow builds the repo root. v2 is now the deployed app. v1 remains in `v1/` for reference/manual use.
 
-1. Pobieranie lokalizacji (HTML5 Geolocation, wysoka dokładność)
-2. Wyszukiwanie najbliższej atrakcji (Wikipedia pl: geosearch + ekstrakt wstępu)
-3. Generowanie 3‑zdaniowego skryptu po polsku (OpenAI `gpt-4o-mini`)
-4. Generowanie audio (ElevenLabs `eleven_multilingual_v2`, głos Bella)
-5. Odtwarzanie audio, następnie 10 s przerwy
+## iOS notes
 
-Wszelkie błędy są wyświetlane z maksymalnie szczegółowym opisem (HTTP status, fragment odpowiedzi, stack), aby ułatwić debugowanie.
-
-## Deploy na GitHub Pages
-
-Workflow `.github/workflows/deploy.yml` uruchamia się na każdy `push` do dowolnego brancha oraz manualnie (`workflow_dispatch`).
-Kroki: checkout → install → build (z sekretami) → upload artefaktu → deploy na Pages.
-
-Adres bazowy (`base`) Vite jest ustawiany automatycznie na `/<NazwaRepozytorium>/` w CI, co umożliwia poprawne ładowanie zasobów na Pages. Lokalnie `base` to `/`.
-
-## iOS (iPhone SE / Chrome)
-
-- Pierwsze naciśnięcie „Start” odblokowuje audio (wymóg iOS).
-- Musisz zezwolić na dostęp do lokalizacji.
-- Odtwarzanie audio odbywa się elementem `<audio playsinline>`.
+- First user tap is used to unlock audio on iOS via a muted play/pause.
+- `<audio playsinline>` is used for inline playback.

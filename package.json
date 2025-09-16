@@ -1,6 +1,6 @@
 {
-  "name": "audio-guide-frontend",
-  "version": "1.0.0",
+  "name": "tour-guide-v2",
+  "version": "0.1.0",
   "private": true,
   "type": "module",
   "scripts": {
@@ -8,7 +8,11 @@
     "build": "vite build",
     "preview": "vite preview --port 5173 --strictPort"
   },
+  "dependencies": {
+    "leaflet": "^1.9.4"
+  },
   "devDependencies": {
+    "@types/leaflet": "^1.9.10",
     "typescript": "^5.5.4",
     "vite": "^5.4.2"
   }
