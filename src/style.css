@@ -1,0 +1,4 @@
+/* Basic reset and utility styles for v2 */
+html, body, #app { height: 100%; }
+body { margin: 0; background: #0b0b0c; color: #f0f0f2; }
+

@@ -1,63 +1,39 @@
-type Stage =
-  | 'Bezczynny'
-  | 'Pobieranie lokalizacji'
-  | 'Wyszukiwanie atrakcji'
-  | 'Generowanie skryptu'
-  | 'Generowanie audio'
-  | 'Odtwarzanie'
-  | 'Oczekiwanie';
+import L from 'leaflet';
 
+type Stage = 'Idle' | 'Locating' | 'Searching attractions' | 'Generating script' | 'Generating audio' | 'Play' | 'Waiting';
 type Lang = 'pl' | 'en';
 
 type GeoPosition = { lat: number; lon: number };
-
 type Attraction = {
   pageId: number;
   title: string;
   extract: string;
+  lat: number;
+  lon: number;
   distanceMeters: number;
 };
 
 const OPENAI_API_KEY = import.meta.env.VITE_OPENAI_API_KEY as string | undefined;
 const ELEVENLABS_API_KEY = import.meta.env.VITE_ELEVENLABS_API_KEY as string | undefined;
 
-const ELEVENLABS_DEFAULT_VOICE = 'EXAVITQu4vr4xnSDxMaL'; // Bella (multilingual)
+const ELEVENLABS_DEFAULT_VOICE = 'EXAVITQu4vr4xnSDxMaL';
 const ELEVENLABS_MODEL = 'eleven_multilingual_v2';
 
 const stageEl = document.getElementById('stage') as HTMLSpanElement;
 const statusEl = document.getElementById('status') as HTMLDivElement;
-const startBtn = document.getElementById('startBtn') as HTMLButtonElement;
-const stopBtn = document.getElementById('stopBtn') as HTMLButtonElement;
 const audioEl = document.getElementById('player') as HTMLAudioElement;
-const langSelect = document.getElementById('lang') as HTMLSelectElement | null;
 
-let running = false;
-let currentStage: Stage = 'Bezczynny';
+let currentStage: Stage = 'Idle';
+let runningInteraction = false;
+let audioUnlocked = false;
 
 function setStage(stage: Stage) {
   currentStage = stage;
   stageEl.textContent = stage;
 }
 
-function appendStatus(message: string, isError = false) {
-  const prefix = isError ? '❌ ' : '• ';
-  statusEl.innerText = `${statusEl.innerText}\n${prefix}${message}`.trim();
-  if (isError) {
-    statusEl.classList.add('error');
-  }
-}
-
-function resetStatus(text: string) {
-  statusEl.classList.remove('error');
-  statusEl.innerText = text;
-}
-
-function wait(ms: number) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-function getSelectedLang(): Lang {
-  return (langSelect?.value === 'en' ? 'en' : 'pl');
+function setStatus(message: string) {
+  statusEl.textContent = message;
 }
 
 function ensureEnvOrThrow() {
@@ -65,38 +41,31 @@ function ensureEnvOrThrow() {
   if (!OPENAI_API_KEY) missing.push('VITE_OPENAI_API_KEY');
   if (!ELEVENLABS_API_KEY) missing.push('VITE_ELEVENLABS_API_KEY');
   if (missing.length) {
-    const msg = `Brak zmiennych środowiskowych: ${missing.join(', ')}. Upewnij się, że sekrety repozytorium są ustawione i przekazywane do kompilacji.`;
-    throw new Error(msg);
+    throw new Error(`Missing env: ${missing.join(', ')}`);
   }
 }
 
+function wait(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 async function getLocation(): Promise<GeoPosition> {
-  setStage('Pobieranie lokalizacji');
+  setStage('Locating');
   return new Promise((resolve, reject) => {
     if (!('geolocation' in navigator)) {
-      reject(new Error('Geolokalizacja nie jest obsługiwana przez tę przeglądarkę.'));
+      reject(new Error('Geolocation unsupported'));
       return;
     }
     navigator.geolocation.getCurrentPosition(
-      (pos) => {
-        resolve({ lat: pos.coords.latitude, lon: pos.coords.longitude });
-      },
-      (err) => {
-        const details = `code=${err.code}, message=${err.message}`;
-        reject(new Error(`Nie udało się pobrać lokalizacji. Szczegóły: ${details}`));
-      },
-      {
-        enableHighAccuracy: true,
-        timeout: 15000,
-        maximumAge: 0,
-      }
+      (pos) => resolve({ lat: pos.coords.latitude, lon: pos.coords.longitude }),
+      (err) => reject(new Error(`Geolocation failed: code=${err.code} ${err.message}`)),
+      { enableHighAccuracy: true, timeout: 15000, maximumAge: 0 }
     );
   });
 }
 
-async function fetchNearestAttraction(position: GeoPosition, lang: Lang): Promise<Attraction> {
-  setStage('Wyszukiwanie atrakcji');
-  // 1) Geosearch near coordinates (language-specific Wikipedia)
+async function fetchNearbyAttractions(position: GeoPosition, lang: Lang): Promise<Attraction[]> {
+  setStage('Searching attractions');
   const wikiHost = lang === 'en' ? 'https://en.wikipedia.org' : 'https://pl.wikipedia.org';
   const geoUrl = new URL(wikiHost + '/w/api.php');
   geoUrl.searchParams.set('format', 'json');
@@ -104,24 +73,15 @@ async function fetchNearestAttraction(position: GeoPosition, lang: Lang): Promis
   geoUrl.searchParams.set('action', 'query');
   geoUrl.searchParams.set('list', 'geosearch');
   geoUrl.searchParams.set('gscoord', `${position.lat}|${position.lon}`);
-  geoUrl.searchParams.set('gsradius', '1500'); // meters
-  geoUrl.searchParams.set('gslimit', '10');
+  geoUrl.searchParams.set('gsradius', '1500');
+  geoUrl.searchParams.set('gslimit', '20');
 
   const geoResp = await fetch(geoUrl.toString(), { mode: 'cors' });
-  if (!geoResp.ok) {
-    throw new Error(`Błąd zapytania geosearch Wikipedia: HTTP ${geoResp.status}`);
-  }
+  if (!geoResp.ok) throw new Error(`Wikipedia geosearch HTTP ${geoResp.status}`);
   const geoData = await geoResp.json();
-  const results = geoData?.query?.geosearch as Array<any> | undefined;
-  if (!results || results.length === 0) {
-    throw new Error('Nie znaleziono żadnych atrakcji w pobliżu (Wikipedia geosearch).');
-  }
-  const best = results[0];
-  const pageId = best.pageid as number;
-  const title = best.title as string;
-  const distance = best.dist as number;
+  const results = (geoData?.query?.geosearch ?? []) as Array<any>;
 
-  // 2) Fetch intro extract for page
+  const pageIds = results.map((r) => r.pageid).join('|');
   const extractUrl = new URL(wikiHost + '/w/api.php');
   extractUrl.searchParams.set('format', 'json');
   extractUrl.searchParams.set('origin', '*');
@@ -130,71 +90,74 @@ async function fetchNearestAttraction(position: GeoPosition, lang: Lang): Promis
   extractUrl.searchParams.set('exintro', '');
   extractUrl.searchParams.set('explaintext', '');
   extractUrl.searchParams.set('redirects', '1');
-  extractUrl.searchParams.set('pageids', String(pageId));
+  extractUrl.searchParams.set('pageids', pageIds);
 
   const extResp = await fetch(extractUrl.toString(), { mode: 'cors' });
-  if (!extResp.ok) {
-    throw new Error(`Błąd pobierania opisu z Wikipedii: HTTP ${extResp.status}`);
-  }
+  if (!extResp.ok) throw new Error(`Wikipedia extract HTTP ${extResp.status}`);
   const extData = await extResp.json();
-  const page = extData?.query?.pages?.[pageId];
-  const extract = (page?.extract as string | undefined) ?? '';
+  const pages = extData?.query?.pages ?? {};
 
-  return {
-    pageId,
-    title,
-    extract,
-    distanceMeters: distance ?? NaN,
-  };
+  const attractions: Attraction[] = results.map((r: any) => {
+    const p = pages?.[r.pageid];
+    return {
+      pageId: r.pageid,
+      title: r.title,
+      extract: (p?.extract as string | undefined) ?? '',
+      lat: r.lat,
+      lon: r.lon,
+      distanceMeters: r.dist ?? NaN,
+    };
+  });
+  return attractions;
 }
 
-async function generateGuideText(attraction: Attraction, lang: Lang): Promise<string> {
-  setStage('Generowanie skryptu');
-
+async function generateAgenticScript(attraction: Attraction, lang: Lang): Promise<string> {
+  setStage('Generating script');
   ensureEnvOrThrow();
+
   const isPl = lang === 'pl';
+  const wikiLink = (lang === 'en' ? `https://en.wikipedia.org/?curid=${attraction.pageId}` : `https://pl.wikipedia.org/?curid=${attraction.pageId}`);
   const system = isPl
-    ? 'Jesteś lokalnym przewodnikiem turystycznym. Tworzysz zwięzłe, przyjazne i naturalne opisy atrakcji w języku polskim.'
-    : 'You are a local tour guide. You create concise, friendly and natural descriptions of attractions in English.';
-  const distance = isFinite(attraction.distanceMeters) ? Math.round(attraction.distanceMeters) + ' m' : (isPl ? 'nieznana' : 'unknown');
-  const extract = attraction.extract || (isPl ? 'brak' : 'none');
+    ? 'Jesteś przewodnikiem z dostępem do narzędzi. Najpierw przeszukujesz źródła, potem tworzysz mówiony skrypt.'
+    : 'You are a tour guide with tool-use. First research the topic, then write a spoken script.';
+
+  const distance = isFinite(attraction.distanceMeters)
+    ? `${Math.round(attraction.distanceMeters)} m`
+    : (isPl ? 'nieznana' : 'unknown');
+  const summary = attraction.extract || (isPl ? 'brak' : 'none');
+
+  // Ask the model to research using provided context, then write
   const user = isPl
-    ? `
-Atrakcja: ${attraction.title}
+    ? `Najpierw przeprowadź krótkie rozeznanie na podstawie danych i linku poniżej, a potem przygotuj skrypt audio.
+Tytuł: ${attraction.title}
 Odległość: ${distance}
-Opis (skrót z Wikipedii, może być niepełny): ${extract}
+Streszczenie (Wikipedii, może być niepełne): ${summary}
+Źródło: ${wikiLink}
 
-Zadanie: Napisz dokładnie 3 zdania po polsku o najbliższej atrakcji dla audio przewodnika.
 Zasady:
-- Zaczynaj od krótkiego przedstawienia miejsca i jego znaczenia.
-- Używaj naturalnego języka mówionego, unikaj nawiasów, skrótów i przypisów.
-- Dodaj jedną ciekawostkę lub kontekst historyczny, jeśli to możliwe.
-- Nie wspominaj o Wikipedii ani o źródłach.
-- Maksymalnie ~60 słów łącznie.
-`
-    : `
-Attraction: ${attraction.title}
+- 3–4 zdania, naturalny język mówiony.
+- ~60–80 słów.
+- Nie wspominaj o źródłach ani linkach.`
+    : `First, research briefly using the data and link below, then write the audio script.
+Title: ${attraction.title}
 Distance: ${distance}
-Summary (intro from Wikipedia, may be incomplete): ${extract}
+Summary (from Wikipedia, may be incomplete): ${summary}
+Source: ${wikiLink}
 
-Task: Write exactly 3 sentences in English about the nearest attraction for an audio guide.
 Guidelines:
-- Start with a brief introduction of the place and why it matters.
-- Use natural spoken language; avoid parentheses, abbreviations, and citations.
-- Add one fun fact or historical context if possible.
-- Do not mention Wikipedia or sources.
-- About ~60 words total.
-`;
+- 3–4 sentences, natural spoken English.
+- ~60–80 words.
+- Do not mention sources or links.`;
 
   const body = {
     model: 'gpt-4o-mini',
-    temperature: 0.7,
-    max_tokens: 300,
+    temperature: 0.6,
+    max_tokens: 350,
     messages: [
       { role: 'system', content: system },
       { role: 'user', content: user },
     ],
-  };
+  } as const;
 
   const resp = await fetch('https://api.openai.com/v1/chat/completions', {
     method: 'POST',
@@ -204,21 +167,15 @@ Guidelines:
     },
     body: JSON.stringify(body),
   });
-  if (!resp.ok) {
-    const text = await resp.text().catch(() => '');
-    throw new Error(`OpenAI API błąd: HTTP ${resp.status}. Odpowiedź: ${text.slice(0, 500)}`);
-  }
+  if (!resp.ok) throw new Error(`OpenAI HTTP ${resp.status}`);
   const data = await resp.json();
   const content = data?.choices?.[0]?.message?.content as string | undefined;
-  if (!content) {
-    throw new Error('OpenAI nie zwrócił treści. Sprawdź limity i klucz API.');
-  }
-  // Sanitize minimal
+  if (!content) throw new Error('Empty completion');
   return content.replace(/\n+/g, ' ').trim();
 }
 
 async function synthesizeAudio(text: string, _lang: Lang): Promise<Blob> {
-  setStage('Generowanie audio');
+  setStage('Generating audio');
   ensureEnvOrThrow();
 
   const url = `https://api.elevenlabs.io/v1/text-to-speech/${encodeURIComponent(
@@ -234,29 +191,24 @@ async function synthesizeAudio(text: string, _lang: Lang): Promise<Blob> {
       style: 0.2,
       use_speaker_boost: true,
     },
-  };
+  } as const;
 
   const resp = await fetch(url, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
-      'Accept': 'audio/mpeg',
+      Accept: 'audio/mpeg',
       'xi-api-key': ELEVENLABS_API_KEY!,
     },
     body: JSON.stringify(body),
   });
-
-  if (!resp.ok) {
-    const textResp = await resp.text().catch(() => '');
-    throw new Error(`ElevenLabs API błąd: HTTP ${resp.status}. Odpowiedź: ${textResp.slice(0, 500)}`);
-  }
-
+  if (!resp.ok) throw new Error(`ElevenLabs HTTP ${resp.status}`);
   const arrayBuffer = await resp.arrayBuffer();
   return new Blob([arrayBuffer], { type: 'audio/mpeg' });
 }
 
 async function playAudioBlob(blob: Blob): Promise<void> {
-  setStage('Odtwarzanie');
+  setStage('Play');
   if (audioEl.src) {
     try { URL.revokeObjectURL(audioEl.src); } catch {}
   }
@@ -265,116 +217,12 @@ async function playAudioBlob(blob: Blob): Promise<void> {
   audioEl.load();
   try {
     await audioEl.play();
-  } catch (err) {
-    const e = err as Error;
-    throw new Error(
-      `Nie udało się odtworzyć audio. iOS wymaga interakcji użytkownika. Spróbuj ponownie nacisnąć Start. Szczegóły: ${e.message}`
-    );
-  }
-
-  // Wait until playback ends or the loop is stopped (pause)
-  await new Promise<void>((resolve, reject) => {
-    const cleanup = () => {
-      audioEl.removeEventListener('ended', onEnded);
-      audioEl.removeEventListener('pause', onPause);
-      audioEl.removeEventListener('error', onError);
-      audioEl.removeEventListener('abort', onAbort);
-      try { URL.revokeObjectURL(objectUrl); } catch {}
-    };
-    const onEnded = () => {
-      cleanup();
-      resolve();
-    };
-    const onPause = () => {
-      // If user stopped the loop, treat as resolved to allow clean exit
-      if (!running) {
-        cleanup();
-        resolve();
-      }
-    };
-    const onError = () => {
-      const mediaError = audioEl.error?.message || 'nieznany błąd mediów';
-      cleanup();
-      reject(new Error(`Błąd odtwarzania audio: ${mediaError}`));
-    };
-    const onAbort = () => {
-      cleanup();
-      reject(new Error('Odtwarzanie przerwane.'));
-    };
-
-    audioEl.addEventListener('ended', onEnded, { once: true });
-    audioEl.addEventListener('pause', onPause);
-    audioEl.addEventListener('error', onError, { once: true });
-    audioEl.addEventListener('abort', onAbort, { once: true });
-  });
-}
-
-async function loopOnce(): Promise<void> {
-  resetStatus('');
-  appendStatus('Start iteracji…');
-  const lang = getSelectedLang();
-  const pos = await getLocation();
-  appendStatus(`Lokalizacja: lat=${pos.lat.toFixed(5)}, lon=${pos.lon.toFixed(5)}`);
-
-  const attraction = await fetchNearestAttraction(pos, lang);
-  appendStatus(`Najbliższa atrakcja: ${attraction.title} (${isFinite(attraction.distanceMeters) ? Math.round(attraction.distanceMeters) + ' m' : '—'})`);
-
-  const text = await generateGuideText(attraction, lang);
-  appendStatus('Wygenerowano skrypt.');
-
-  const audioBlob = await synthesizeAudio(text, lang);
-  appendStatus('Audio gotowe. Odtwarzanie…');
-
-  await playAudioBlob(audioBlob);
-  appendStatus('Odtwarzanie zakończone.');
-
-  if (!running) return;
-  setStage('Oczekiwanie');
-  appendStatus('Czekam 10 sekund…');
-  await wait(10_000);
-}
-
-async function mainLoop() {
-  try {
-    ensureEnvOrThrow();
   } catch (e) {
-    const err = e as Error;
-    setStage('Bezczynny');
-    resetStatus('');
-    appendStatus(err.message, true);
-    return;
+    throw new Error('Playback failed. On iOS, tap again to allow audio.');
   }
-
-  running = true;
-  startBtn.disabled = true;
-  stopBtn.disabled = false;
-
-  while (running) {
-    try {
-      await loopOnce();
-    } catch (e) {
-      const err = e as Error;
-      appendStatus(`Błąd w etapie „${currentStage}”: ${err.message}` + (err.stack ? `\nStack: ${err.stack}` : ''), true);
-      setStage('Oczekiwanie');
-      appendStatus('Odczekuję 10 sekund i spróbuję ponownie…');
-      await wait(10_000);
-    }
-  }
-
-  setStage('Bezczynny');
-  startBtn.disabled = false;
-  stopBtn.disabled = true;
-  appendStatus('Zatrzymano pętlę.');
-}
-
-function stopLoop() {
-  running = false;
-  try { audioEl.pause(); } catch {}
 }
 
 function unlockAudio() {
-  // Attempt to unlock audio on iOS by playing a silent buffer via the <audio> element
-  // We rely on the user gesture on Start to allow playback later.
   audioEl.muted = true;
   audioEl.play().catch(() => {}).finally(() => {
     audioEl.pause();
@@ -383,24 +231,109 @@ function unlockAudio() {
   });
 }
 
-startBtn.addEventListener('click', async () => {
-  resetStatus('Uruchamianie…');
-  unlockAudio();
-  await mainLoop();
-});
+function setupAudioUnlockGesture() {
+  if (audioUnlocked) return;
+  const onGesture = () => {
+    try { unlockAudio(); } finally {
+      audioUnlocked = true;
+      window.removeEventListener('touchend', onGesture);
+      window.removeEventListener('click', onGesture);
+    }
+  };
+  window.addEventListener('touchend', onGesture, { once: true });
+  window.addEventListener('click', onGesture, { once: true });
+}
 
-stopBtn.addEventListener('click', () => {
-  appendStatus('Żądanie zatrzymania…');
-  stopLoop();
-});
+function createSpinnerIcon() {
+  const div = L.divIcon({
+    className: 'spinner-icon',
+    html: '<div class="spinner" style="width:22px;height:22px;border:2px solid rgba(255,255,255,0.3);border-top-color:#fff;border-radius:50%;animation:spin 1s linear infinite"></div>',
+    iconSize: [22, 22],
+    iconAnchor: [11, 11],
+  });
+  const style = document.createElement('style');
+  style.textContent = '@keyframes spin{to{transform:rotate(360deg)}}';
+  document.head.appendChild(style);
+  return div;
+}
 
-// Initial status with environment check feedback
-(() => {
-  const haveOpenAI = Boolean(OPENAI_API_KEY);
-  const have11 = Boolean(ELEVENLABS_API_KEY);
-  const notes: string[] = [];
-  notes.push(`OpenAI klucz: ${haveOpenAI ? 'OK' : 'BRAK'}`);
-  notes.push(`ElevenLabs klucz: ${have11 ? 'OK' : 'BRAK'}`);
-  appendStatus(notes.join(' | '));
-})();
+async function handleAttractionClick(attraction: Attraction, marker: L.Marker, lang: Lang) {
+  if (runningInteraction) return;
+  runningInteraction = true;
+  const originalIcon = marker.getIcon();
+  marker.setIcon(createSpinnerIcon());
+  setStatus('Generating script…');
+
+  try {
+    const script = await generateAgenticScript(attraction, lang);
+    setStatus('Generating audio…');
+    const audioBlob = await synthesizeAudio(script, lang);
+    setStatus('Play');
+    await playAudioBlob(audioBlob);
+    setStatus('Done');
+  } catch (e) {
+    const err = e as Error;
+    setStatus('Error: ' + err.message);
+  } finally {
+    marker.setIcon(originalIcon);
+    runningInteraction = false;
+  }
+}
+
+async function main() {
+  ensureEnvOrThrow();
+  setStatus('Checking environment…');
+  setupAudioUnlockGesture();
+
+  const lang: Lang = (navigator.language?.startsWith('pl') ? 'pl' : 'en');
+  let pos: GeoPosition;
+  try {
+    pos = await getLocation();
+  } catch (e) {
+    setStatus('Geolocation error. Using fallback location.');
+    pos = { lat: 52.2297, lon: 21.0122 }; // Warsaw fallback
+  }
+
+  const map = L.map('map', { zoomControl: true });
+  const tiles = L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+    maxZoom: 19,
+    attribution: '&copy; OpenStreetMap contributors',
+  });
+  tiles.addTo(map);
+  map.setView([pos.lat, pos.lon], 15);
+  L.marker([pos.lat, pos.lon]).addTo(map).bindPopup(lang === 'pl' ? 'Twoja lokalizacja' : 'You are here');
+
+  setStatus('Loading attractions…');
+  let attractions: Attraction[] = [];
+  try {
+    attractions = await fetchNearbyAttractions(pos, lang);
+  } catch (e) {
+    setStatus('Failed to load attractions');
+  }
+
+  const defaultIcon = L.icon({
+    iconUrl: 'https://unpkg.com/leaflet@1.9.4/dist/images/marker-icon.png',
+    iconRetinaUrl: 'https://unpkg.com/leaflet@1.9.4/dist/images/marker-icon-2x.png',
+    shadowUrl: 'https://unpkg.com/leaflet@1.9.4/dist/images/marker-shadow.png',
+    iconSize: [25, 41],
+    iconAnchor: [12, 41],
+    popupAnchor: [1, -34],
+    shadowSize: [41, 41],
+  });
+  (L.Marker.prototype as any).options.icon = defaultIcon;
+
+  attractions.forEach((a) => {
+    const marker = L.marker([a.lat, a.lon]).addTo(map);
+    const distance = isFinite(a.distanceMeters) ? `${Math.round(a.distanceMeters)} m` : '';
+    marker.bindPopup(`<strong>${a.title}</strong><br/>${distance}`);
+    marker.on('click', () => handleAttractionClick(a, marker, lang));
+  });
+
+  setStatus('Ready. Tap a marker.');
+}
+
+main().catch((e) => {
+  const err = e as Error;
+  setStatus('Startup error: ' + err.message);
+});
 
